@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Ion Mobility Web Calculator + IV Plot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+    body { margin: 24px; background:#fafafa; color:#111; }
+    h1 { margin: 0 0 6px; }
+    h2 { margin: 24px 0 8px; }
+    section { background:#fff; padding:16px; border-radius:14px; box-shadow:0 4px 18px rgba(0,0,0,.06); margin-bottom:18px;}
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    label { font-size:14px; color:#333; display:flex; gap:6px; align-items:center; }
+    input, select, textarea, button { padding:10px 12px; border-radius:10px; border:1px solid #ddd; background:#fff; font-size:14px; }
+    input[type="number"] { width: 160px; }
+    .btn { cursor:pointer; border:none; background:#111; color:#fff; }
+    .btn.secondary { background:#4b5563; }
+    .btn.ghost { background:#f3f4f6; color:#111; border:1px solid #e5e7eb; }
+    .grid { display:grid; gap:10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .card { padding:12px; border-radius:12px; background:#f8fafc; border:1px solid #e5e7eb; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .muted { color:#6b7280; font-size:13px; }
+    .table { width:100%; border-collapse: collapse; font-size:14px; }
+    .table th, .table td { border-bottom:1px solid #eee; padding:8px 6px; text-align:center; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+    /* 图表容器自适应：占视口高度 70%，上限 800px */
+    .chart-wrap { position:relative; width:100%; height:70vh; max-height:800px; }
+  </style>
+</head>
+<body>
+  <h1>Ion Mobility Web Calculator</h1>
+  <p class="muted">Upload IV → plot; auto axis bounds; zoom/pan; crossings; conductance; mobilities; power density.</p>
+
+  <!-- Constants -->
+  <section>
+    <h2>Constants & Temperature</h2>
+    <div class="row">
+      <label>T (K) <input id="T" type="number" value="298.15" step="0.01"></label>
+      <span class="pill">k<sub>B</sub>=1.380649e-23</span>
+      <span class="pill">e=1.602176634e-19</span>
+      <span class="pill">N<sub>A</sub>=6.02214076e23</span>
+      <span class="pill">R=8.314462618</span>
+      <span class="pill">F=96485.33212</span>
+    </div>
+  </section>
+
+  <!-- Unit conversion -->
+  <section>
+    <h2>Unit Conversion (σ / λ)</h2>
+    <div class="row">
+      <label>Value <input id="conv_val" type="number" step="any" placeholder="number"></label>
+      <label>c (mol/L) <input id="conv_c" type="number" step="any" placeholder="mol/L"></label>
+      <label>From
+        <select id="conv_from">
+          <option>S/m</option><option>mS/cm</option><option>μS/cm</option>
+          <option>mS/m</option><option>μS/m</option><option>S·cm²/mol</option><option>S·m²/mol</option>
+        </select>
+      </label>
+      <label>To
+        <select id="conv_to">
+          <option>S/m</option><option>mS/cm</option><option>μS/cm</option>
+          <option>mS/m</option><option>μS/m</option><option>S·cm²/mol</option><option>S·m²/mol</option>
+        </select>
+      </label>
+      <button class="btn" onclick="onConvert()">Convert</button>
+      <input id="conv_out" readonly class="mono" style="width:260px" placeholder="result">
+    </div>
+  </section>
+
+  <!-- IV upload/paste -->
+  <section>
+    <h2>IV Data: Upload or Paste</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="row">
+          <input id="file" type="file" accept=".csv,.txt,.tsv,.xlsx,.xls" />
+          <button class="btn" onclick="loadAnyFile()">Upload file (CSV / TXT / XLSX)</button>
+        </div>
+        <p class="muted">Two columns: V (V) and I (A). XLSX: first sheet, auto-detect first two numeric columns.</p>
+      </div>
+      <div class="card">
+        <label>Or paste two columns (V I):</label>
+        <textarea id="paste" rows="6" class="mono" placeholder="0.0, 0.0
+0.005, -2.71e-10
+0.010, -2.35e-10"></textarea>
+        <div class="row">
+          <button class="btn secondary" onclick="loadPasted()">Load from text</button>
+          <button class="btn ghost" onclick="clearData()">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <button class="btn" onclick="analyzeIV()">Analyze IV (crossings + full-curve conductance)</button>
+      <label>Range V<sub>min</sub> <input id="vmin" type="number" step="any"></label>
+      <label>V<sub>max</sub> <input id="vmax" type="number" step="any"></label>
+      <button class="btn secondary" onclick="analyzeRange()">Compute range conductance</button>
+      <button class="btn ghost" onclick="resetZoom()">Reset Zoom</button>
+    </div>
+
+    <div class="grid" style="margin-top:10px;">
+      <div class="card mono" id="iv_status"></div>
+      <div class="card mono" id="crossings"></div>
+      <div class="card mono" id="conductance"></div>
+      <div class="card mono" id="rangeG"></div>
+    </div>
+
+    <!-- 自适应容器 -->
+    <div class="chart-wrap" style="margin-top:12px;">
+      <canvas id="iv_chart"></canvas>
+    </div>
+  </section>
+
+  <!-- Monovalent -->
+  <section>
+    <h2>Monovalent Drift–Diffusion / Mobility</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="row">
+          <label>γ<sub>H</sub> <input id="gammaH" type="number" step="any"></label>
+          <label>γ<sub>L</sub> <input id="gammaL" type="number" step="any"></label>
+          <label>C<sub>H</sub> (mol/L) <input id="CH" type="number" step="any"></label>
+          <label>C<sub>L</sub> (mol/L) <input id="CL" type="number" step="any"></label>
+          <button class="btn" onclick="calcRedox()">Compute E_redox</button>
+          <input id="Eredox" readonly class="mono" placeholder="V">
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label>E<sub>tot</sub> (V) <input id="Etot" type="number" step="any"></label>
+          <label>or Em (V) <input id="Em_mono" type="number" step="any" placeholder="leave blank to use Em=Etot−Eredox"></label>
+          <label>σ (S/m) <input id="sigma_mono" type="number" step="any"></label>
+          <button class="btn secondary" onclick="calcMono()">Compute μ ratio and μ±</button>
+        </div>
+        <div id="mono_out" class="mono" style="margin-top:8px;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- General salt -->
+  <section>
+    <h2>General Salt (arbitrary z⁺/z⁻) Drift–Diffusion / Mobility</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="row">
+          <label>z⁺ <input id="zplus" type="number" step="any" value="2"></label>
+          <label>z⁻ <input id="zminus" type="number" step="any" value="-1"></label>
+          <label>C<sub>H</sub> (mol/L) <input id="CHg" type="number" step="any"></label>
+          <label>C<sub>L</sub> (mol/L) <input id="CLg" type="number" step="any"></label>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label>C⁺ (mol/L) <input id="Cplus" type="number" step="any"></label>
+          <label>C⁻ (mol/L) <input id="Cminus" type="number" step="any"></label>
+          <label>σ (S/m) <input id="sigma_gen" type="number" step="any"></label>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label>E<sub>tot</sub> (V) <input id="Etot_g" type="number" step="any"></label>
+          <label>E<sub>redox</sub> (V) <input id="Eredox_g" type="number" step="any" placeholder="optional if Em is provided"></label>
+          <label>or Em (V) <input id="Em_gen" type="number" step="any"></label>
+          <button class="btn secondary" onclick="calcGeneral()">Compute μ ratio and μ±</button>
+        </div>
+        <div id="gen_out" class="mono" style="margin-top:8px;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Power density -->
+  <section>
+    <h2>Osmotic Power Density</h2>
+    <div class="row">
+      <label>n (channels) <input id="nch" type="number" step="1" value="1"></label>
+      <label>h (m) <input id="h" type="number" step="any" placeholder="height"></label>
+      <label>w (m) <input id="w" type="number" step="any" placeholder="width"></label>
+      <label>Em (V) <input id="Em_pd" type="number" step="any"></label>
+      <label>G (S) <input id="G_pd" type="number" step="any"></label>
+      <button class="btn" onclick="calcPowerDensity()">Compute</button>
+      <input id="pd_out" class="mono" readonly style="width:260px" placeholder="W/m²">
+    </div>
+  </section>
+
+  <section>
+    <h2>Results Table (copy-friendly)</h2>
+    <table class="table" id="result_table">
+      <thead><tr>
+        <th>Concentration</th><th>Total Potential</th><th>Redox</th><th>Em</th>
+        <th>μ⁺/μ⁻</th><th>μ⁺</th><th>μ⁻</th><th>Note</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+<script>
+  // ======= Physical constants =======
+  const KB = 1.380649e-23, E = 1.602176634e-19, NA = 6.02214076e23, R = 8.314462618, F = 96485.33212;
+
+  // ======= Helpers =======
+  const val = id => document.getElementById(id).value;
+  const num = id => parseFloat(val(id));
+  const set = (id, v) => (document.getElementById(id).value = v);
+  const html = (id, v) => (document.getElementById(id).innerHTML = v);
+
+  let V = [], I = [];
+  let ivChart = null;
+
+  function toNum(x){
+    if (x == null) return NaN;
+    if (typeof x === 'number') return x;
+    let s = String(x).trim().replace(/\u2212/g, '-').replace(/\s+/g, '');
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  // ======= Axis bounds (auto with padding) =======
+  function bounds(arr){
+    const lo = Math.min(...arr), hi = Math.max(...arr);
+    if (!isFinite(lo) || !isFinite(hi)) return {min:0, max:1};
+    if (lo === hi) return {min: lo-1, max: hi+1};
+    const pad = 0.05 * (hi - lo);
+    return {min: lo - pad, max: hi + pad};
+  }
+
+  // ======= Unit conversion =======
+  function convertTo_S_per_m(value, unit, c){
+    if(unit === "S/m") return value;
+    if(unit === "mS/cm") return value * 0.1;
+    if(unit === "μS/cm") return value * 1e-4;
+    if(unit === "mS/m")  return value * 1e-3;
+    if(unit === "μS/m")  return value * 1e-6;
+    if(unit === "S·cm²/mol") return value * 1e-4 * c * 1000;
+    if(unit === "S·m²/mol")  return value * c * 1000;
+    throw Error("Unsupported unit: " + unit);
+  }
+  function from_S_per_m(s, unit, c){
+    if(unit === "S/m") return s;
+    if(unit === "mS/cm") return s / 0.1;
+    if(unit === "μS/cm") return s / 1e-4;
+    if(unit === "mS/m")  return s / 1e-3;
+    if(unit === "μS/m")  return s / 1e-6;
+    if(unit === "S·cm²/mol") return s / (c * 1000 * 1e-4);
+    if(unit === "S·m²/mol")  return s / (c * 1000);
+    throw Error("Unsupported unit: " + unit);
+  }
+  function onConvert(){
+    try{
+      const v = parseFloat(val('conv_val')), c = parseFloat(val('conv_c'));
+      const from = val('conv_from'), to = val('conv_to');
+      if(!isFinite(v)) throw Error("Enter a numeric value");
+      if((from.includes("mol") || to.includes("mol")) && !isFinite(c)) throw Error("Concentration c (mol/L) is required for molar units");
+      const s = convertTo_S_per_m(v, from, c || 0);
+      const out = from_S_per_m(s, to, c || 0);
+      set('conv_out', out.toExponential(6) + " " + to);
+    }catch(e){ set('conv_out', "Error: " + e.message); }
+  }
+
+  // ======= Parse text =======
+  function parseTwoCols(text){
+    const lines = text.trim().split(/\r?\n/);
+    const vv=[], ii=[];
+    for(const ln of lines){
+      if(!ln.trim()) continue;
+      const parts = ln.trim().split(/[,\t\s]+/);
+      if(parts.length < 2) continue;
+      const v = toNum(parts[0]), i = toNum(parts[1]);
+      if(Number.isFinite(v) && Number.isFinite(i)){ vv.push(v); ii.push(i); }
+    }
+    return {V: vv, I: ii};
+  }
+
+  // ======= Loaders =======
+  function loadPasted(){
+    const txt = val('paste');
+    const {V: vv, I: ii} = parseTwoCols(txt);
+    V = vv; I = ii;
+    if (V.length < 2) { html('iv_status', 'No valid V/I pairs found in pasted text.'); return; }
+    html('iv_status', `Loaded points: ${V.length} (from pasted text)`); previewFirstRows(); renderChart();
+  }
+  function clearData(){ V=[]; I=[]; html('iv_status','Cleared'); html('crossings',''); html('conductance',''); html('rangeG',''); renderChart(true); }
+
+  function loadAnyFile(){
+    const f = document.getElementById('file').files[0];
+    if(!f){ html('iv_status','Please choose a file'); return; }
+    const name = f.name.toLowerCase();
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) readXLSX(f); else readTextFile(f);
+  }
+  function readTextFile(file){
+    const rdr = new FileReader();
+    rdr.onload = e => {
+      const {V: vv, I: ii} = parseTwoCols(e.target.result);
+      V = vv; I = ii;
+      if (V.length < 2){ html('iv_status', `No valid V/I pairs in ${file.name}`); return; }
+      html('iv_status', `Loaded points: ${V.length} (from ${file.name})`); previewFirstRows(); renderChart();
+    };
+    rdr.readAsText(file);
+  }
+  function readXLSX(file){
+    const rdr = new FileReader();
+    rdr.onload = e => {
+      try{
+        const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:true});
+        let colV=0,colI=1;
+        outer: for(let c1=0;c1<6;c1++)for(let c2=c1+1;c2<8;c2++){let hits=0;
+          for(let r=0;r<Math.min(rows.length,15);r++){const v=toNum(rows[r]?.[c1]),i=toNum(rows[r]?.[c2]);
+            if(Number.isFinite(v)&&Number.isFinite(i)){ if(++hits>=2){colV=c1;colI=c2;break outer;} } } }
+        const vv=[],ii=[];
+        for(const r of rows){ if(!r) continue; const v=toNum(r[colV]), i=toNum(r[colI]); if(Number.isFinite(v)&&Number.isFinite(i)){vv.push(v);ii.push(i);} }
+        V=vv; I=ii;
+        if (V.length < 2){ html('iv_status', `No valid numeric V/I pairs in ${file.name}`); return; }
+        html('iv_status', `Loaded points: ${V.length} (from ${file.name}, sheet "${wb.SheetNames[0]}")`); previewFirstRows(); renderChart();
+      }catch(err){ html('iv_status', `Failed to parse ${file.name}: ${err.message}`); }
+    };
+    rdr.readAsArrayBuffer(file);
+  }
+
+  // ======= Preview first 5 rows =======
+  function previewFirstRows(){
+    const n=Math.min(5,V.length); let s='<b>Preview (first 5 rows):</b><br><span class="mono">';
+    for(let k=0;k<n;k++) s+=`${V[k]}\t${I[k]}<br>`; s+='</span>'; html('crossings', s);
+  }
+
+  // ======= Linear regression =======
+  function linregress_full(x,y){
+    const n=x.length; let sx=0,sy=0,sxx=0,sxy=0;
+    for(let k=0;k<n;k++){ sx+=x[k]; sy+=y[k]; sxx+=x[k]*x[k]; sxy+=x[k]*y[k]; }
+    const denom=n*sxx - sx*sx; if(Math.abs(denom)<1e-20) throw Error('Bad fit');
+    const slope=(n*sxy - sx*sy)/denom; const intercept=(sy - slope*sx)/n;
+    return {slope, intercept};
+  }
+  function calcConductance(V,I,vmin=null,vmax=null){
+    let X=V, Y=I;
+    if(vmin!=null&&vmax!=null){ const lo=Math.min(vmin,vmax), hi=Math.max(vmin,vmax);
+      const x=[],y=[]; for(let k=0;k<V.length;k++) if(V[k]>=lo&&V[k]<=hi){x.push(V[k]);y.push(I[k]);}
+      if(x.length<2) throw Error('Not enough points in selected range'); X=x; Y=y; }
+    return linregress_full(X,Y);
+  }
+
+  // ======= Zero-crossings =======
+  function zeroCrossings(V,I){
+    const xs=[]; for(let k=0;k<I.length-1;k++){ const i0=I[k], i1=I[k+1];
+      if(i0===0) xs.push(V[k]); else if(i0*i1<0){ const v0=V[k],v1=V[k+1]; xs.push(v0 - i0*(v1-v0)/(i1-i0)); } }
+    return xs.sort((a,b)=>a-b);
+  }
+
+  // ======= Chart.js =======
+  function renderChart(clear=false){
+    const ctx = document.getElementById('iv_chart').getContext('2d');
+    const scatterData = V.map((v,i)=>({x:v,y:I[i]}));
+    const xb = bounds(V), yb = bounds(I);
+
+    const config = {
+      type: 'scatter',
+      data: { datasets: clear ? [] : [{ type:'scatter', label:'IV Points', data:scatterData, pointRadius:3 }] },
+      options: {
+        responsive:true, maintainAspectRatio:false, parsing:false,
+        layout:{ padding:10 },
+        plugins:{
+          legend:{ position:'top' },
+          zoom:{
+            pan:{ enabled:true, mode:'xy' },
+            zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'xy' }
+          }
+        },
+        scales:{
+          x:{ title:{display:true,text:'Voltage (V)'}, min: xb.min, max: xb.max, ticks:{ maxTicksLimit:8 } },
+          y:{ title:{display:true,text:'Current (A)'}, min: yb.min, max: yb.max, ticks:{ maxTicksLimit:8 } }
+        }
+      }
+    };
+
+    if (ivChart) ivChart.destroy();
+    ivChart = new Chart(ctx, config);
+  }
+  function overlayFitLine(slope,intercept,label){
+    if(!ivChart || V.length<2) return;
+    const xmin=Math.min(...V), xmax=Math.max(...V);
+    ivChart.data.datasets.push({ type:'line', label, data:[{x:xmin,y:slope*xmin+intercept},{x:xmax,y:slope*xmax+intercept}], borderWidth:2, fill:false });
+    ivChart.update();
+  }
+  function overlayMarkers(xs,label){
+    if(!ivChart||!xs.length) return;
+    ivChart.data.datasets.push({ type:'scatter', label, data: xs.map(x=>({x,y:0})), pointStyle:'triangle', pointRadius:6 });
+    ivChart.update();
+  }
+  function resetZoom(){ if(ivChart){ ivChart.resetZoom(); } }
+
+  // ======= Analysis =======
+  function analyzeIV(){
+    try{
+      if(V.length<2) throw Error("Load IV data first");
+      renderChart(); // 重绘以自适应边界
+      const xs = zeroCrossings(V,I);
+      if(xs.length===0) html('crossings','No I=0 crossing found');
+      else{
+        const left=xs[0], right=xs[xs.length-1], mid=xs.length===1?xs[0]:(left+right)/2;
+        html('crossings', `E_total left=${left.toExponential(6)} V; mid=${mid.toExponential(6)} V; right=${right.toExponential(6)} V`);
+        overlayMarkers([left, ...(xs.length>1?[mid,right]:[])], 'Zero-current crossings');
+      }
+      const {slope,intercept}=calcConductance(V,I);
+      html('conductance', `Full-curve G = ${slope.toExponential(6)} S; intercept = ${intercept.toExponential(6)} A`);
+      overlayFitLine(slope,intercept,'Full-curve fit');
+    }catch(e){ html('conductance','Error: '+e.message); }
+  }
+  function analyzeRange(){
+    try{
+      if(V.length<2) throw Error("Load IV data first");
+      const v1=parseFloat(val('vmin')), v2=parseFloat(val('vmax'));
+      if(!isFinite(v1)||!isFinite(v2)) throw Error("Enter Vmin/Vmax");
+      const {slope,intercept}=calcConductance(V,I,v1,v2);
+      html('rangeG', `Range [${v1}, ${v2}] G = ${slope.toExponential(6)} S; intercept = ${intercept.toExponential(6)} A`);
+      overlayFitLine(slope,intercept,`Range fit [${v1}, ${v2}]`);
+    }catch(e){ html('rangeG','Error: '+e.message); }
+  }
+
+  // ======= Mobility & Power density（同前略，保持不变） =======
+  function calcRedox(){ try{
+    const T=num('T'), gH=num('gammaH'), gL=num('gammaL'), CH=num('CH'), CL=num('CL');
+    if([T,gH,gL,CH,CL].some(x=>!isFinite(x))) throw Error("Missing parameters");
+    const Eredox=(KB*T/E)*Math.log((gH*CH)/(gL*CL)); set('Eredox',Eredox.toExponential(8));
+  }catch(e){ set('Eredox','Error: '+e.message);} }
+  function appendRow(conc,Etot,Eredox,Em,ratio,mup,mum,note){
+    const tbody=document.querySelector('#result_table tbody'); const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${conc}</td><td>${Etot}</td><td>${Eredox}</td><td>${Em}</td><td>${ratio}</td><td>${mup}</td><td>${mum}</td><td>${note||''}</td>`;
+    tbody.appendChild(tr);
+  }
+  function calcMono(){ try{
+    const T=num('T'), CH=num('CH'), CL=num('CL'), sigma=num('sigma_mono');
+    let Em=parseFloat(val('Em_mono')); const Etot=parseFloat(val('Etot')), Eredox=parseFloat(val('Eredox'));
+    if(!isFinite(Em)){ if(!isFinite(Etot)||!isFinite(Eredox)) throw Error("Provide Em, or Etot and Eredox"); Em=Etot-Eredox; }
+    if(![CH,CL,sigma,Em,T].every(isFinite)) throw Error("Missing parameters");
+    const lnDelta=Math.log(CH/CL), nume=lnDelta+(E*Em)/(KB*T), deno=lnDelta-(E*Em)/(KB*T);
+    if(Math.abs(deno)<1e-12) throw Error("Denominator too small"); const ratio=nume/deno;
+    if(Math.abs(1+ratio)<1e-12) throw Error("μ⁺/μ⁻ = -1 → μ⁻ → ∞");
+    const mu_sum=sigma/(E*NA*CH*1000), mu_minus=mu_sum/(1+ratio), mu_plus=mu_sum-mu_minus;
+    document.getElementById('mono_out').innerText=
+`Em = ${Em.toExponential(6)} V
+μ⁺/μ⁻ = ${ratio.toExponential(6)}
+μ⁺ = ${mu_plus.toExponential(6)} (m²/V·s)
+μ⁻ = ${mu_minus.toExponential(6)} (m²/V·s)`;
+    appendRow('-', isFinite(Etot)?Etot.toExponential(6):'', isFinite(Eredox)?Eredox.toExponential(6):'', Em.toExponential(6),
+              ratio.toExponential(6), mu_plus.toExponential(6), mu_minus.toExponential(6), 'Monovalent');
+  }catch(e){ document.getElementById('mono_out').innerText='Error: '+e.message; } }
+  function calcGeneral(){ try{
+    const T=num('T'); let zp=num('zplus'), zm=num('zminus'); const CH=num('CHg'), CL=num('CLg');
+    const Cplus=num('Cplus'), Cminus=num('Cminus'), sigma=num('sigma_gen');
+    let Em=parseFloat(val('Em_gen')); const Etot=parseFloat(val('Etot_g')), Eredox=parseFloat(val('Eredox_g'));
+    if(!isFinite(Em)){ if(!isFinite(Etot)||!isFinite(Eredox)) throw Error("Provide Em, or Etot and Eredox"); Em=Etot-Eredox; }
+    if(![zp,zm,CH,CL,Cplus,Cminus,sigma,Em,T].every(isFinite)) throw Error("Missing parameters");
+    const lnDelta=Math.log(CH/CL), numerator=lnDelta-(Math.abs(zm)*F*Em)/(R*T)*Math.sign(zm),
+          denominator=lnDelta-(Math.abs(zp)*F*Em)/(R*T)*Math.sign(zp);
+    if(Math.abs(denominator)<1e-12) throw Error("Denominator too small");
+    let alpha=(Math.abs(zp)/Math.abs(zm)) * (- numerator / denominator); alpha=Math.abs(alpha);
+    const denom_mu_minus=F*(Math.abs(zp)*alpha*Cplus + Math.abs(zm)*Cminus); if(Math.abs(denom_mu_minus)<1e-16) throw Error("Bad σ denominator");
+    const mu_minus=(sigma/denom_mu_minus)/1000, mu_plus=alpha*mu_minus;
+    document.getElementById('gen_out').innerText=
+`Em = ${Em.toExponential(6)} V
+μ⁺/μ⁻ = ${alpha.toExponential(6)}
+μ⁺ = ${mu_plus.toExponential(6)} (m²/V·s)
+μ⁻ = ${mu_minus.toExponential(6)} (m²/V·s)`;
+    appendRow('-', isFinite(Etot)?Etot.toExponential(6):'', isFinite(Eredox)?Eredox.toExponential(6):'', Em.toExponential(6),
+              alpha.toExponential(6), mu_plus.toExponential(6), mu_minus.toExponential(6), 'General');
+  }catch(e){ document.getElementById('gen_out').innerText='Error: '+e.message; } }
+  function calcPowerDensity(){ try{
+    const n=num('nch'), h=num('h'), w=num('w'), Em=num('Em_pd'), G=num('G_pd');
+    if(![n,h,w,Em,G].every(isFinite)) throw Error("Missing parameters");
+    const Posm=0.25*Em*Em*G, Aeff=n*h*w, Pdens=Posm/Aeff; set('pd_out', Pdens.toExponential(6)+' W/m²');
+  }catch(e){ set('pd_out','Error: '+e.message); } }
+</script>
+</body>
+</html>
